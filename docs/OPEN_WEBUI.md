@@ -48,6 +48,7 @@ Options:
 ./mference-ui.sh --model scratch/qwen36.gturbo   # preload instead of loading lazily
 ./mference-ui.sh --max-context 32768             # applies to every model
 ./mference-ui.sh --prefill-chunk 1024            # smaller prefill chunks, less memory
+./mference-ui.sh --idle-unload 10m               # free the model's memory after 10 idle minutes
 ./mference-ui.sh --server-port 8081 --webui-port 3001
 ./mference-ui.sh --build-path /tmp/mference-build  # separate toolchain build artifacts
 ./mference-ui.sh --data-dir /tmp/mference-ui-test # isolated chats/settings for testing
@@ -222,6 +223,39 @@ single-model mode `/health` is unchanged: `{"status":"ok"}`.
 
 Switching back and forth costs a full reload each way. Keep a conversation on
 one model when you can, and use `--model` to preload the one you start with.
+
+## Unloading the model
+
+The loaded model keeps its memory until another model replaces it. Two
+library-mode controls release it without loading another:
+
+- `--idle-unload <duration>` — on the launcher and the server; `30s`, `10m`,
+  `2h`, or `off` (the default) — releases it once no request has run or queued
+  for that long. The clock starts when the last request finishes, or at startup
+  for a model preloaded with `--model`.
+- `POST /v1/models/unload` releases it now. This is a Mference extension: the
+  OpenAI API has no unload request, so Open WebUI has no button for it.
+
+  ```bash
+  curl --silent --show-error -X POST http://127.0.0.1:8080/v1/models/unload
+  ```
+
+  The body is optional; `{"model": "<id>"}` unloads only that model, and an
+  unknown identifier is `404 model_not_found`. The reply names what was
+  released — `{"unloaded":"qwen3.6-35b-a3b"}`, or `{"unloaded":null}` when no
+  model, or a different one, was loaded. A full queue is `429`, as for chat
+  requests, and single-model mode answers `400 library_mode_required`.
+
+Both take a turn in the request queue, like a swap: the generation in flight,
+and everything queued ahead of it, finishes first, and a request that arrives
+meanwhile waits for the unload. Afterwards `/health` reports
+`{"status":"ok","model":null}`, and the next chat request pays a full load and
+prefills its whole prompt, because the reusable KV prefix went with the model.
+Each unload is logged:
+
+```text
+[2026-10-01T09:12:00Z] unload model=qwen3.6-35b-a3b reason=idle
+```
 
 ## Builtin tools are off for Mference models
 

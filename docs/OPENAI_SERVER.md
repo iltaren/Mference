@@ -15,7 +15,8 @@ The `--library` mode that UI runs on serves every installed model from this one
 process, listing them all in `/v1/models` and swapping the resident model in
 place when a request names a different one. It changes nothing about the mode
 described here, which is what runs whenever `--library` is absent. The UI guide
-covers library mode, its model identifiers, and the cost of a swap.
+covers library mode, its model identifiers, the cost of a swap, and
+[unloading the model](OPEN_WEBUI.md#unloading-the-model).
 
 ## Start the server
 
@@ -252,6 +253,9 @@ Endpoints:
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
+- `POST /v1/models/unload` — library mode only, and a Mference extension rather
+  than part of the OpenAI API; see
+  [Unloading the model](OPEN_WEBUI.md#unloading-the-model)
 
 Each model in `GET /v1/models` carries `max_model_len`, vLLM's field: the
 context window for prompt plus completion that the model runs with. That is

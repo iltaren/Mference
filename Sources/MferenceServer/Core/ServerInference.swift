@@ -87,9 +87,24 @@ public actor ServerCoordinator {
     private var waiters: [Waiter] = []
     private var claims = 0
     private var shuttingDown = false
+    /// Library mode's `--idle-unload`: once nothing has run, queued, or
+    /// claimed a place for `idleTimeout`, `onIdle` runs as a turn of its own.
+    private let idleTimeout: Duration?
+    private let onIdle: @Sendable () async -> Void
+    private let sleep: @Sendable (Duration) async throws -> Void
+    private var idleTimer: Task<Void, Never>?
 
-    public init(queueLimit: Int) {
+    /// `sleep` is the seam tests use to drive the idle timer without the clock.
+    public init(queueLimit: Int,
+                idleTimeout: Duration? = nil,
+                onIdle: @escaping @Sendable () async -> Void = {},
+                sleep: @escaping @Sendable (Duration) async throws -> Void = {
+                    try await Task.sleep(for: $0)
+                }) {
         self.queueLimit = queueLimit
+        self.idleTimeout = idleTimeout
+        self.onIdle = onIdle
+        self.sleep = sleep
     }
 
     /// Claims a place, renders, then waits its turn. Rendering stays outside
@@ -107,6 +122,7 @@ public actor ServerCoordinator {
             rendered = try await render()
         } catch {
             claims -= 1
+            armIdleTimer()
             throw error
         }
         try await acquire(onQueued: onQueued)
@@ -130,6 +146,7 @@ public actor ServerCoordinator {
         let occupancy = (active ? 1 : 0) + waiters.count + claims
         guard occupancy < queueLimit + 1 else { throw ServerRequestError.queueFull }
         claims += 1
+        cancelIdleTimer()
     }
 
     private func acquire(onQueued: @escaping @Sendable () -> Void) async throws {
@@ -162,16 +179,56 @@ public actor ServerCoordinator {
         waiter.continuation.resume(throwing: CancellationError())
     }
 
-    private func release() {
+    private func release(armingIdleTimer: Bool = true) {
         if waiters.isEmpty {
             active = false
+            if armingIdleTimer { armIdleTimer() }
         } else {
             waiters.removeFirst().continuation.resume()
         }
     }
 
+    /// Starts the idle clock before the first request, so a model preloaded at
+    /// startup is released too if no request ever comes.
+    public func startIdleTimer() {
+        armIdleTimer()
+    }
+
+    /// Arms only when nothing is running, queued, or claimed; any claim
+    /// cancels it again.
+    private func armIdleTimer() {
+        guard let idleTimeout, !shuttingDown, !active, waiters.isEmpty, claims == 0 else { return }
+        idleTimer?.cancel()
+        let sleep = self.sleep
+        idleTimer = Task { [weak self] in
+            do {
+                try await sleep(idleTimeout)
+            } catch {
+                return
+            }
+            await self?.idleTimerFired()
+        }
+    }
+
+    private func cancelIdleTimer() {
+        idleTimer?.cancel()
+        idleTimer = nil
+    }
+
+    /// Runs on the timer's own task. A timer cancelled by a claim after its
+    /// sleep had already ended finds itself cancelled here and does nothing.
+    /// After the idle action nothing is re-armed until a request has run.
+    private func idleTimerFired() async {
+        guard !Task.isCancelled, !shuttingDown, !active, waiters.isEmpty, claims == 0 else { return }
+        idleTimer = nil
+        active = true
+        await onIdle()
+        release(armingIdleTimer: false)
+    }
+
     public func shutdown() {
         shuttingDown = true
+        cancelIdleTimer()
         let queued = waiters
         waiters.removeAll()
         for waiter in queued {
@@ -181,6 +238,7 @@ public actor ServerCoordinator {
 
     public var queuedCount: Int { waiters.count }
     public var isActive: Bool { active }
+    var isIdleTimerArmed: Bool { idleTimer != nil }
 }
 
 public actor ServerModelSession: ServerLoadedModel {

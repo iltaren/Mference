@@ -22,7 +22,7 @@ class LauncherTests(unittest.TestCase):
     def test_missing_values_are_actionable(self):
         for flag in ("--library", "--model", "--server-port", "--webui-port",
                      "--max-context", "--prompt-cache-mode", "--prefill-chunk", "--build-path",
-                     "--data-dir"):
+                     "--data-dir", "--idle-unload"):
             for suffix in ([], ["--dry-run"]):
                 with self.subTest(flag=flag, suffix=suffix):
                     result = self.run_launcher(flag, *suffix)
@@ -36,7 +36,8 @@ class LauncherTests(unittest.TestCase):
                      ("--max-context", "999999999999999999999"),
                      ("--prompt-cache-mode", "unknown"),
                      ("--prefill-chunk", "1000"), ("--prefill-chunk", "big"),
-                     ("--server-port", "3000")]:
+                     ("--idle-unload", "0m"), ("--idle-unload", "10"),
+                     ("--idle-unload", "soon"), ("--server-port", "3000")]:
             with self.subTest(args=args):
                 result = self.run_launcher(*args, "--dry-run")
                 self.assertNotEqual(result.returncode, 0)
@@ -57,6 +58,14 @@ class LauncherTests(unittest.TestCase):
         result = self.run_launcher("--prefill-chunk", "1024", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--prefill-chunk 1024", result.stdout)
+
+    def test_idle_unload_is_passed_to_the_server(self):
+        result = self.run_launcher("--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--idle-unload off", result.stdout)
+        result = self.run_launcher("--idle-unload", "10m", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--idle-unload 10m", result.stdout)
 
     def test_install_dry_run_does_not_download(self):
         result = self.run_launcher("--build-path", "/tmp/mference-test-build", "install", "qwen36", "--resume", "--dry-run")

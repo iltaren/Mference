@@ -514,6 +514,75 @@ struct ServerModelLibrarySwapTests {
         #expect(recovered.modelID == "alpha")
         #expect(library.snapshot.health.model == "alpha")
     }
+
+    /// Unloading releases the resident session, health reports nothing
+    /// loaded, and the next request pays an ordinary load.
+    @Test func unloadReleasesTheResidentModelAndTheNextResolveLoadsItAgain() async throws {
+        let log = LibraryEventLog()
+        let library = makeLibrary(makeIndex([(id: "alpha", path: "/models/alpha")]), log: log)
+        _ = try await library.resolve(modelID: "alpha")
+
+        let unloaded = try await library.unload(reason: .request)
+        #expect(unloaded == "alpha")
+        #expect(log.events == ["load alpha", "release alpha"])
+        #expect(library.snapshot.health.status == "ok")
+        #expect(library.snapshot.health.model == nil)
+
+        _ = try await library.resolve(modelID: "alpha")
+        #expect(log.events == ["load alpha", "release alpha", "load alpha"])
+    }
+
+    @Test func unloadWithNothingResidentDoesNothing() async throws {
+        let log = LibraryEventLog()
+        let library = makeLibrary(makeIndex([(id: "alpha", path: "/models/alpha")]), log: log)
+        let unloaded = try await library.unload(reason: .idle)
+        #expect(unloaded == nil)
+        #expect(log.events.isEmpty)
+    }
+
+    /// Naming a model unloads only that model, so an unload meant for a model
+    /// that has since been swapped out cannot take down its replacement.
+    @Test func unloadNamingAnotherModelKeepsTheResidentOne() async throws {
+        let log = LibraryEventLog()
+        let library = makeLibrary(
+            makeIndex([(id: "alpha", path: "/models/alpha"),
+                       (id: "beta", path: "/models/beta")]),
+            log: log)
+        _ = try await library.resolve(modelID: "alpha")
+
+        let unloaded = try await library.unload(modelID: "beta", reason: .request)
+        #expect(unloaded == nil)
+        #expect(log.events == ["load alpha"])
+        #expect(library.snapshot.health.model == "alpha")
+        await #expect(throws: ServerRequestError.unknownModel) {
+            _ = try await library.unload(modelID: "missing", reason: .request)
+        }
+    }
+
+    /// An unload that arrives while a load is in flight waits for it, then
+    /// unloads the model that load produced.
+    @Test func unloadWaitsForALoadInFlight() async throws {
+        let log = LibraryEventLog()
+        let gate = LoadGate()
+        let library = makeLibrary(
+            makeIndex([(id: "alpha", path: "/models/alpha")]),
+            log: log,
+            beforeLoad: { _ in await gate.wait() })
+
+        async let resolved: Void = {
+            _ = try await library.resolve(modelID: "alpha")
+        }()
+        await gate.waitUntilEntered()
+        async let unloaded = library.unload(reason: .request)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(log.events.isEmpty)
+
+        await gate.open()
+        try await resolved
+        #expect(try await unloaded == "alpha")
+        #expect(log.events == ["load alpha", "release alpha"])
+        #expect(library.snapshot.health.model == nil)
+    }
 }
 
 /// Parks a fake load until the test releases it.
@@ -1001,6 +1070,185 @@ struct LibraryHTTPServerTests {
             body: #"{"model":"beta","messages":[{"role":"user","content":"hi"}]}"#)
         #expect(response.statusCode == 200)
         #expect(log.events == ["load beta"])
+
+        try await server.shutdown()
+    }
+
+    // MARK: Unload
+
+    private func unload(port: Int,
+                        body: String? = nil,
+                        method: String = "POST") async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/models/unload")!)
+        request.httpMethod = method
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.httpBody = Data(body.utf8)
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        return (data, response as! HTTPURLResponse)
+    }
+
+    private func jsonObject(_ data: Data) throws -> [String: Any] {
+        try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func health(port: Int) async throws -> [String: Any] {
+        let data = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/health")!).0
+        return try jsonObject(data)
+    }
+
+    @Test func unloadEndpointReleasesTheResidentModel() async throws {
+        let log = LibraryEventLog()
+        let library = makeLibrary(makeIndex([(id: "alpha", path: "/models/alpha")]), log: log)
+        try await library.preload(modelID: "alpha")
+        let server = MferenceHTTPServer(library: library, queueLimit: 1)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        let (data, response) = try await unload(port: port)
+        #expect(response.statusCode == 200)
+        #expect(try jsonObject(data)["unloaded"] as? String == "alpha")
+        #expect(log.events == ["load alpha", "release alpha"])
+        let afterUnload = try await health(port: port)
+        #expect(afterUnload["status"] as? String == "ok")
+        #expect(afterUnload["model"] is NSNull)
+
+        // Unloading again is a successful no-op.
+        let (again, againResponse) = try await unload(port: port)
+        #expect(againResponse.statusCode == 200)
+        #expect(try jsonObject(again)["unloaded"] is NSNull)
+        #expect(log.events == ["load alpha", "release alpha"])
+
+        try await server.shutdown()
+    }
+
+    @Test func unloadEndpointNamingAModelUnloadsOnlyThatModel() async throws {
+        let log = LibraryEventLog()
+        let library = makeLibrary(
+            makeIndex([(id: "alpha", path: "/models/alpha"),
+                       (id: "beta", path: "/models/beta")]),
+            log: log)
+        try await library.preload(modelID: "alpha")
+        let server = MferenceHTTPServer(library: library, queueLimit: 1)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        let (missing, missingResponse) = try await unload(port: port, body: #"{"model":"missing"}"#)
+        #expect(missingResponse.statusCode == 404)
+        #expect(String(decoding: missing, as: UTF8.self).contains("model_not_found"))
+
+        let (other, otherResponse) = try await unload(port: port, body: #"{"model":"beta"}"#)
+        #expect(otherResponse.statusCode == 200)
+        #expect(try jsonObject(other)["unloaded"] is NSNull)
+        #expect(log.events == ["load alpha"])
+
+        let (named, namedResponse) = try await unload(port: port, body: #"{"model":"alpha"}"#)
+        #expect(namedResponse.statusCode == 200)
+        #expect(try jsonObject(named)["unloaded"] as? String == "alpha")
+        #expect(log.events == ["load alpha", "release alpha"])
+
+        try await server.shutdown()
+    }
+
+    /// Like a swap, an unload never releases the model under a running
+    /// generation: it queues and runs once that generation has finished.
+    @Test func unloadWaitsForTheRunningGeneration() async throws {
+        let log = LibraryEventLog()
+        let generation = LoadGate()
+        let library = makeLibrary(
+            makeIndex([(id: "alpha", path: "/models/alpha")]),
+            log: log,
+            beforeGenerate: { _ in await generation.wait() })
+        let server = MferenceHTTPServer(library: library, queueLimit: 4)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        async let running = post(
+            port: port,
+            body: #"{"model":"alpha","messages":[{"role":"user","content":"hi"}]}"#)
+        await generation.waitUntilEntered()
+
+        async let unloaded = unload(port: port)
+        var waited = 0
+        while await server.queuedRequestCount == 0, waited < 200 {
+            try await Task.sleep(for: .milliseconds(10))
+            waited += 1
+        }
+        #expect(await server.queuedRequestCount == 1)
+        #expect(log.events == ["load alpha"])
+
+        await generation.open()
+        let (_, runningResponse) = try await running
+        #expect(runningResponse.statusCode == 200)
+        let (data, response) = try await unloaded
+        #expect(response.statusCode == 200)
+        #expect(try jsonObject(data)["unloaded"] as? String == "alpha")
+        #expect(log.events == ["load alpha", "release alpha"])
+
+        try await server.shutdown()
+    }
+
+    @Test func unloadEndpointRejectsOtherMethodsAndMalformedBodies() async throws {
+        let log = LibraryEventLog()
+        let library = makeLibrary(makeIndex([(id: "alpha", path: "/models/alpha")]), log: log)
+        try await library.preload(modelID: "alpha")
+        let server = MferenceHTTPServer(library: library, queueLimit: 1)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        let (_, getResponse) = try await unload(port: port, method: "GET")
+        #expect(getResponse.statusCode == 405)
+        let (malformed, malformedResponse) = try await unload(port: port, body: "{not json")
+        #expect(malformedResponse.statusCode == 400)
+        #expect(String(decoding: malformed, as: UTF8.self).contains("invalid_json"))
+        #expect(log.events == ["load alpha"])
+
+        try await server.shutdown()
+    }
+
+    /// Single-model mode has no way to load its model again, so it refuses.
+    @Test func unloadNeedsLibraryMode() async throws {
+        let backend = FakeLibraryModel(modelID: "solo", chatDialect: .gemma, log: LibraryEventLog())
+        let server = MferenceHTTPServer(modelID: "solo", queueLimit: 1, backend: backend)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        let (data, response) = try await unload(port: port)
+        #expect(response.statusCode == 400)
+        #expect(String(decoding: data, as: UTF8.self).contains("library_mode_required"))
+
+        try await server.shutdown()
+    }
+
+    /// End to end with the real clock: a preloaded model that sees no request
+    /// for the idle timeout is unloaded, and the next request loads it again.
+    @Test func idleUnloadReleasesThePreloadedModel() async throws {
+        let log = LibraryEventLog()
+        let library = makeLibrary(makeIndex([(id: "alpha", path: "/models/alpha")]), log: log)
+        try await library.preload(modelID: "alpha")
+        let server = MferenceHTTPServer(library: library, queueLimit: 1,
+                                        idleUnload: .milliseconds(100))
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        var waited = 0
+        while library.snapshot.health.model != nil, waited < 500 {
+            try await Task.sleep(for: .milliseconds(10))
+            waited += 1
+        }
+        #expect(try await health(port: port)["model"] is NSNull)
+        #expect(log.events == ["load alpha", "release alpha"])
+
+        let (_, response) = try await post(
+            port: port,
+            body: #"{"model":"alpha","messages":[{"role":"user","content":"hi"}]}"#)
+        #expect(response.statusCode == 200)
+        // The timer re-arms after that request, so a later idle unload may
+        // already have appended its own release.
+        #expect(Array(log.events.prefix(3)) == ["load alpha", "release alpha", "load alpha"])
 
         try await server.shutdown()
     }

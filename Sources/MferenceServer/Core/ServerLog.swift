@@ -70,6 +70,10 @@ enum ServerLog {
         write("swap failed model=\(model) error=\(String(describing: error))")
     }
 
+    static func modelUnloaded(model: String, reason: ServerUnloadReason) {
+        write("unload model=\(model) reason=\(reason.rawValue)")
+    }
+
     /// Reported once per candidate the library declined, so a partial or gated
     /// install is visibly absent rather than silently missing.
     static func librarySkipped(directory: String, reason: String) {

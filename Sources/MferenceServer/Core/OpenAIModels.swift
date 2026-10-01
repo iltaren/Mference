@@ -272,6 +272,12 @@ public struct OpenAIModelList: Codable, Equatable, Sendable {
     public let data: [Model]
 }
 
+/// Body of `POST /v1/models/unload`, a Mference extension; the body itself
+/// is optional.
+struct OpenAIUnloadRequest: Decodable {
+    let model: String?
+}
+
 public enum ServerRequestError: Error, Equatable, Sendable {
     case invalid(message: String, param: String?, code: String)
     case unknownModel

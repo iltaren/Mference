@@ -64,7 +64,8 @@ do {
             }
             try await library.preload(modelID: preload.modelID)
         }
-        server = MferenceHTTPServer(library: library, queueLimit: arguments.queueLimit)
+        server = MferenceHTTPServer(library: library, queueLimit: arguments.queueLimit,
+                                    idleUnload: arguments.idleUnload)
         readyDetail = "mode=library models=\(index.entries.count)"
     } else {
         guard let explicitModelURL else {

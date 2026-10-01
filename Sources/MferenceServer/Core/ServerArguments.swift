@@ -30,6 +30,9 @@ public struct ServerArguments: Equatable, Sendable {
     /// `--list-models`: run discovery, print what library mode would serve, and
     /// exit without binding a port or loading a model.
     public let listModels: Bool
+    /// `--idle-unload`: library mode releases the loaded model after this long
+    /// with no request running or queued; nil (`off`) keeps it loaded.
+    public let idleUnload: Duration?
 
     /// `--max-context` when it is not given.
     public static let defaultMaxContext = 16_384
@@ -60,6 +63,12 @@ public struct ServerArguments: Equatable, Sendable {
                              then exit 0 without binding a port or loading a
                              model. This is what `./mference-ui.sh models`
                              reports.
+      --idle-unload <duration|off>
+                             With --library: unload the loaded model after it
+                             has served no request for this long, such as 30s,
+                             10m or 2h (default off). The next request loads
+                             it again. POST /v1/models/unload unloads it at
+                             once.
       --port <1...65535>     Listening port (default 8080).
       --bind <mode>          loopback or tailnet (default loopback). tailnet
                              binds only the machine's Tailscale IPv4 address
@@ -126,6 +135,7 @@ public struct ServerArguments: Equatable, Sendable {
         var wantsDefaultLibraryRoots = false
         var listModels = false
         var reserveFullKV = false
+        var idleUnload: Duration?
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -225,6 +235,8 @@ public struct ServerArguments: Equatable, Sendable {
                         "--verify must be \(ModelIntegrityPolicy.verifyFlagValues)")
                 }
                 verification = parsed
+            case "--idle-unload":
+                idleUnload = try idleUnloadDuration(value)
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -242,6 +254,11 @@ public struct ServerArguments: Equatable, Sendable {
             // command line.
             guard !listModels else {
                 throw ServerArgumentError.invalid("--list-models requires --library")
+            }
+            // Single-model mode has no way to load its model again once it
+            // has been released.
+            guard idleUnload == nil else {
+                throw ServerArgumentError.invalid("--idle-unload requires --library")
             }
             guard model != nil else {
                 throw ServerArgumentError.invalid("--model is required")
@@ -263,7 +280,30 @@ public struct ServerArguments: Equatable, Sendable {
                                prefillChunk: prefillChunk,
                                reserveFullKV: reserveFullKV,
                                library: library,
-                               listModels: listModels)
+                               listModels: listModels,
+                               idleUnload: idleUnload)
+    }
+
+    /// `off`, or a positive whole number of seconds, minutes or hours: `30s`,
+    /// `10m`, `2h`.
+    static func idleUnloadDuration(_ value: String) throws -> Duration? {
+        if value == "off" { return nil }
+        let invalid = ServerArgumentError.invalid(
+            "--idle-unload must be off or a whole number of seconds, minutes or hours, such as 30s, 10m or 2h")
+        let multiplier: Int
+        switch value.last {
+        case "s": multiplier = 1
+        case "m": multiplier = 60
+        case "h": multiplier = 3_600
+        default: throw invalid
+        }
+        let digits = value.dropLast()
+        guard !digits.isEmpty,
+              digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let count = Int(digits), count > 0 else { throw invalid }
+        let (seconds, overflow) = count.multipliedReportingOverflow(by: multiplier)
+        guard !overflow else { throw invalid }
+        return .seconds(seconds)
     }
 }
 

@@ -20,6 +20,7 @@ max_context=16384
 prompt_cache_mode=single-prefix
 prefill_chunk=auto
 kv_reserve=0
+idle_unload=off
 preload_model=""
 library_roots=()
 dry_run=0
@@ -72,6 +73,11 @@ usage: ./mference-ui.sh [options]                      start the UI
                          up front, passed through to MferenceServer. By
                          default Gemma 4, Qwen 3.6 and Inkling grow it with
                          the conversation from 16384 tokens.
+  --idle-unload <duration|off>
+                         Unload the loaded model after it has served no
+                         request for this long, such as 30s, 10m or 2h,
+                         passed through to MferenceServer (default off). The
+                         next chat loads it again.
   --dry-run              Print what would run, start nothing, exit 0. Works
                          for every subcommand, before or after it.
   --help                 Show this message.
@@ -111,6 +117,7 @@ while [[ $# -gt 0 ]]; do
     --prompt-cache-mode) require_value "$@"; prompt_cache_mode="$2"; shift 2 ;;
     --prefill-chunk) require_value "$@"; prefill_chunk="$2"; shift 2 ;;
     --kv-reserve) kv_reserve=1; shift ;;
+    --idle-unload) require_value "$@"; idle_unload="$2"; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) note "error: unknown option $1"; usage >&2; exit 2 ;;
@@ -134,6 +141,7 @@ webui_port="$((10#$webui_port))"
 [[ "$server_port" -ne "$webui_port" ]] || fail "server and UI need different ports"
 case "$prompt_cache_mode" in off|single-prefix) ;; *) fail "--prompt-cache-mode must be off or single-prefix" ;; esac
 case "$prefill_chunk" in auto|32|64|128|256|512|1024|2048|4096) ;; *) fail "--prefill-chunk must be auto, 32, 64, 128, 256, 512, 1024, 2048 or 4096" ;; esac
+[[ "$idle_unload" == off || "$idle_unload" =~ ^0*[1-9][0-9]*[smh]$ ]] || fail "--idle-unload must be off or a whole number of seconds, minutes or hours, such as 30s, 10m or 2h"
 [[ "$build_path" == /* ]] || build_path="$repository_root/$build_path"
 [[ "$data_directory" == /* ]] || data_directory="$repository_root/$data_directory"
 server_binary="$build_path/release/MferenceServer"
@@ -143,6 +151,7 @@ server_arguments=(
   --max-context "$max_context"
   --prompt-cache-mode "$prompt_cache_mode"
   --prefill-chunk "$prefill_chunk"
+  --idle-unload "$idle_unload"
 )
 if [[ "$kv_reserve" -eq 1 ]]; then
   server_arguments+=(--kv-reserve)

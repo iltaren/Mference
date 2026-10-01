@@ -43,13 +43,19 @@ public actor MferenceHTTPServer {
         self.heartbeatInterval = heartbeatInterval
     }
 
+    /// `idleUnload` is `--idle-unload`: after that long with no request
+    /// running or queued, the resident model is released.
     public init(library: ServerModelLibrary,
                 queueLimit: Int,
+                idleUnload: Duration? = nil,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.mode = .library(library)
-        self.coordinator = ServerCoordinator(queueLimit: queueLimit)
+        self.coordinator = ServerCoordinator(
+            queueLimit: queueLimit,
+            idleTimeout: idleUnload,
+            onIdle: { _ = try? await library.unload(reason: .idle) })
         self.heartbeatInterval = heartbeatInterval
     }
 
@@ -77,6 +83,7 @@ public actor MferenceHTTPServer {
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
         let channel = try await bootstrap.bind(host: host, port: port).get()
         self.channel = channel
+        await coordinator.startIdleTimer()
         return channel
     }
 
@@ -238,7 +245,17 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             case .library(let library):
                 handleLibraryCompletion(library, body: body, context: context)
             }
-        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"):
+        case (.POST, "/v1/models/unload"):
+            switch mode {
+            case .single:
+                writeError(context, status: .badRequest,
+                           OpenAIErrorEnvelope(message: "unloading a model requires --library mode",
+                                               code: "library_mode_required"))
+            case .library(let library):
+                handleUnload(library, body: body, context: context)
+            }
+        case (_, "/health"), (_, "/v1/models"), (_, "/v1/models/unload"),
+             (_, "/v1/chat/completions"):
             writeError(context, status: .methodNotAllowed,
                        OpenAIErrorEnvelope(message: "method not allowed",
                                            code: "method_not_allowed"))
@@ -498,6 +515,46 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             writeError(context, status: .badRequest,
                        OpenAIErrorEnvelope(message: "malformed JSON request",
                                            code: "invalid_json"))
+        }
+    }
+
+    /// Library mode's `POST /v1/models/unload`, a Mference extension: the
+    /// OpenAI API has no unload. It runs as a turn of its own, so the
+    /// generation in flight and everything queued ahead of it finish on the
+    /// model first. The body is optional; `{"model": id}` unloads only that
+    /// model, and an unknown one is a `404` before a queue place is claimed.
+    private func handleUnload(_ library: ServerModelLibrary,
+                              body: ByteBuffer,
+                              context: ChannelHandlerContext) {
+        let requestedModelID: String?
+        if body.readableBytes == 0 {
+            requestedModelID = nil
+        } else {
+            let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
+            guard let decoded = try? JSONDecoder().decode(OpenAIUnloadRequest.self, from: Data(bytes)) else {
+                writeError(context, status: .badRequest,
+                           OpenAIErrorEnvelope(message: "malformed JSON request",
+                                               code: "invalid_json"))
+                return
+            }
+            requestedModelID = decoded.model
+        }
+        if let requestedModelID, library.snapshot.entry(for: requestedModelID) == nil {
+            writeError(context, status: .notFound, ServerRequestError.unknownModel.envelope)
+            return
+        }
+        let contextBox = SendableContext(context)
+        activeTask = childChannels.startTask {
+            do {
+                let unloaded = try await self.coordinator.run {
+                    try await library.unload(modelID: requestedModelID, reason: .request)
+                }
+                self.writeJSON(contextBox.value, status: .ok,
+                               object: ["unloaded": unloaded.map { $0 as Any } ?? NSNull()])
+            } catch {
+                let (envelope, status) = self.failure(for: error)
+                self.writeError(contextBox.value, status: status, envelope)
+            }
         }
     }
 

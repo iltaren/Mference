@@ -70,9 +70,22 @@ public final class ServerLibrarySnapshot: Sendable {
             $0.loaded = modelID
         }
     }
+
+    func didUnload() {
+        state.withLock { $0.loaded = nil }
+    }
 }
 
-/// Holds the one model that is loaded and swaps it in place.
+/// Why the library released its model, as the server log reports it.
+public enum ServerUnloadReason: String, Sendable {
+    /// `POST /v1/models/unload`.
+    case request
+    /// `--idle-unload`.
+    case idle
+}
+
+/// Holds the one model that is loaded, swaps it in place, and releases it on
+/// unload.
 ///
 /// Exactly one `ServerModelSession` exists at a time and no second model
 /// process is ever spawned: a request for a different model releases the
@@ -158,6 +171,33 @@ public actor ServerModelLibrary {
             ServerLog.modelSwapFailed(model: entry.modelID, error: error)
             throw error
         }
+    }
+
+    /// Releases the resident model — Metal buffers, expert cache, and KV with
+    /// it — and returns its identifier, or nil when nothing was released. With
+    /// `modelID`, only that model is released, so an unload aimed at a model
+    /// that has since been swapped out leaves its replacement alone. The next
+    /// `resolve` loads again.
+    ///
+    /// Like `resolve`, it runs inside the coordinator's turn, so no generation
+    /// is using the session it releases.
+    public func unload(modelID: String? = nil, reason: ServerUnloadReason) async throws -> String? {
+        var target: String?
+        if let modelID {
+            guard let entry = index.entry(for: modelID) else { throw ServerRequestError.unknownModel }
+            target = entry.modelID
+        }
+        while isLoading {
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        // Only the identifier is bound, for the same reason as in `resolve`: a
+        // local holding the session would keep it alive past this point.
+        guard let residentModelID = current?.modelID,
+              target == nil || target == residentModelID else { return nil }
+        current = nil
+        snapshot.didUnload()
+        ServerLog.modelUnloaded(model: residentModelID, reason: reason)
+        return residentModelID
     }
 
     /// Startup preload for `--model` alongside `--library`. Without it the
