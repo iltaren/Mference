@@ -121,21 +121,20 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
-        var slabRaw: UnsafeMutableRawPointer?
-        let allocResult = posix_memalign(&slabRaw, Self.scratchAlignment,
-                                         allocationSize * slotCount)
-        guard allocResult == 0, let slab = slabRaw else {
+        let slabLength = allocationSize * slotCount
+        guard let slab = Self.mapAlignedSlab(length: slabLength) else {
+            let mapError = errno
             close(openedFD)
-            throw StreamerError.allocFailed(errno: allocResult)
+            throw StreamerError.allocFailed(errno: mapError)
         }
         nonisolated(unsafe) let capturedSlab = slab
         guard let slabBuffer = device.makeBuffer(
             bytesNoCopy: slab,
-            length: allocationSize * slotCount,
+            length: slabLength,
             options: .storageModeShared,
-            deallocator: { _, _ in free(capturedSlab) })
+            deallocator: { _, _ in munmap(capturedSlab, slabLength) })
         else {
-            free(slab)
+            munmap(slab, slabLength)
             close(openedFD)
             throw StreamerError.bufferWrapFailed
         }
@@ -163,6 +162,27 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     deinit {
         close(fd)
+    }
+
+    /// Anonymous pages at a `scratchAlignment` boundary, released with
+    /// `munmap`. `posix_memalign` and `free` would hand a block this large
+    /// back to malloc, which keeps it dirty for reuse: a library server that
+    /// unloads its model would go on carrying every slab. Maps one alignment
+    /// more than needed, then unmaps the unaligned head and the spare tail.
+    /// `length` must be a whole number of pages.
+    static func mapAlignedSlab(length: Int) -> UnsafeMutableRawPointer? {
+        let padded = length + scratchAlignment
+        let mapped = mmap(nil, padded, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0)
+        if mapped == MAP_FAILED { return nil }
+        guard let mapped else { return nil }
+        let start = UInt(bitPattern: mapped)
+        let mask = UInt(scratchAlignment) - 1
+        let aligned = (start + mask) & ~mask
+        let head = Int(aligned - start)
+        if head > 0 { munmap(mapped, head) }
+        let tail = padded - head - length
+        if tail > 0 { munmap(mapped.advanced(by: head + length), tail) }
+        return mapped.advanced(by: head)
     }
 
     public func loadExpert(layer: Int, expert: Int) throws
