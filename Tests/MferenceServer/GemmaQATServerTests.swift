@@ -56,7 +56,9 @@ struct GemmaQATServerTests {
             #expect(received.request.generationConfig.repetitionPenalty == 1)
             #expect(received.request.reasoningEffort == .xhigh)
             #expect(received.request.maximumCompletionTokens == 4096)
-            #expect(backend.tokenizer.decode(received.promptIDs, skipSpecialTokens: false).hasSuffix("<|turn>model\n"))
+            // Contract change: a QAT thinking turn starts inside the thought channel.
+            #expect(backend.tokenizer.decode(received.promptIDs, skipSpecialTokens: false)
+                .hasSuffix("<|turn>model\n<|channel>thought\n"))
             let text = String(decoding: data, as: UTF8.self)
             #expect(text.contains("reasoning_content"))
             #expect(!text.contains("<|channel>"))
@@ -237,13 +239,16 @@ private actor QATProfileBackend: ServerLoadedModel {
         received = prepared
         started = true
         if blocks { await withCheckedContinuation { continuation = $0 } }
+        let preopened = tokenizer.startsInThinking(reasoningEffort: prepared.request.reasoningEffort,
+            promptIDs: prepared.promptIDs)
         let decoder = StructuredAssistantDecoder(tokenizer: tokenizer, allowedTools: [],
-            startsInThought: tokenizer.startsInThinking(reasoningEffort: prepared.request.reasoningEffort, promptIDs: prepared.promptIDs))
+            startsInThought: preopened)
         var reasoning = ""
         var content = ""
         decoder.onReasoning = { reasoning += $0; onEvent(.reasoning($0)) }
+        let opener = preopened ? "" : "<|channel>thought\n"
         let output = (prepared.request.reasoningEffort != nil && prepared.request.reasoningEffort != .off
-            ? "<|channel>thought\nChecked.<channel|>" : "") + "Done."
+            ? opener + "Checked.<channel|>" : "") + "Done."
         for id in tokenizer.encode(output, addBOS: false) {
             for event in try decoder.consume(tokenID: id, delta: tokenizer.decode([id], skipSpecialTokens: false)) {
                 if case .content(let text) = event { content += text; onEvent(.content(text)) }

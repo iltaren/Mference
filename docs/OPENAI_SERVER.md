@@ -370,7 +370,10 @@ rules, but its source drops ordinary assistant reasoning and retains tool-call
 reasoning only after the latest user message. Every accepted
 `preserve_thinking` value follows that source policy, including while queued.
 The two checkpoints retain their distinct source templates; their prompt bytes
-and cache reuse counts need not be identical. After tool results, the source suffix does
+and cache reuse counts need not be identical. With thinking enabled, a new QAT
+model turn starts inside a pre-opened thought channel: the source suffix ends
+at the bare model header, where the 26B can skip thinking, so Mference appends
+`<|channel>thought\n` to it. After tool results, the source suffix does
 not pre-open a thought channel. Reasoning, visible content and tool calls still
 use the same separate API fields. See [QAT defaults and qualification](RUNTIME_CONTROLS.md#gemma-qat).
 

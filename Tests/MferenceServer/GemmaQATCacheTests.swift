@@ -27,8 +27,10 @@ import Testing
         }
         let first = request([.init(role: .user, content: "Lookup")])
         let prompt = try render(first)
+        // a thinking prompt pre-opens the channel; the model writes the rest
+        #expect(tok.startsInThinking(reasoningEffort: first.reasoningEffort, promptIDs: prompt) == thinking)
         let call = ParsedToolCall(id: "call_1", name: "lookup", arguments: .object([:]), argumentsJSON: "{}")
-        let thought = thinking ? "<|channel>thought\nCheck" + (newlineBeforeClose ? "\n" : "") + "<channel|>" : ""
+        let thought = thinking ? "Check" + (newlineBeforeClose ? "\n" : "") + "<channel|>" : ""
         let kv = prompt + tok.encode(thought + "<|tool_call>call:lookup{}<tool_call|>", addBOS: false)
         var cache = ServerPromptCache()
         cache.publish(domain: domain, request: first, content: "", calls: [call],
@@ -69,7 +71,8 @@ import Testing
         }
         let first = request([.init(role: .user, content: "Hi")])
         let prompt = try tok.encodeChat(messages: first.messages, reasoningEffort: .medium)
-        let kv = prompt + tok.encode("<|channel>thought\nCheck.<channel|>Hello.", addBOS: false)
+        #expect(tok.startsInThinking(reasoningEffort: .medium, promptIDs: prompt))
+        let kv = prompt + tok.encode("Check.<channel|>Hello.", addBOS: false)
         var cache = ServerPromptCache()
         cache.publish(domain: domain, request: first, content: "Hello.", calls: [],
             result: RawDecodeResult(prefillTokens: prompt.count, cachedPromptTokens: 0,

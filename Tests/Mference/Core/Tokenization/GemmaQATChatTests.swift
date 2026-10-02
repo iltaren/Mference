@@ -64,11 +64,31 @@ import Testing
                               parameters: $0.function.parameters ?? .object([:])) }
     }
 
+    /// `<|channel>thought\n` as the oracle tokenizes it: its non-thinking
+    /// generation suffix is that opener followed by `<channel|>`.
+    static func thoughtOpener(_ tokenizer: MFTokenizer, oracle: Oracle) throws -> [Int32] {
+        let off = try #require(oracle.cases.first { $0.name == "normal" && !$0.thinking && $0.generate })
+        let ids = try #require(off.ids)
+        #expect(off.render?.hasSuffix("<|turn>model\n<|channel>thought\n<channel|>") == true)
+        let start = try #require(ids.lastIndex(of: tokenizer.channelStartID))
+        return Array(ids[start..<(ids.count - 1)])
+    }
+
     static func compare(_ tokenizer: MFTokenizer, oracle: Oracle) throws {
         #expect(oracle.template_sha256 == templateSHA)
         #expect(oracle.jinja == "3.1.6" && oracle.tokenizers == "0.23.2")
         #expect(oracle.cases.count == 72)
-        for item in oracle.cases {
+        let opener = try thoughtOpener(tokenizer, oracle: oracle)
+        var preopened = 0
+        for var item in oracle.cases {
+            // Contract change: a thinking turn the source opens with the bare
+            // model header starts inside the thought channel.
+            if item.thinking, item.generate, let render = item.render, render.hasSuffix("<|turn>model\n") {
+                item = .init(name: item.name, thinking: item.thinking, generate: item.generate,
+                    render: render + "<|channel>thought\n", ids: item.ids.map { $0 + opener },
+                    error: item.error, messages: item.messages, tools: item.tools)
+                preopened += 1
+            }
             let messages = try nativeMessages(item)
             let tools = nativeTools(item)
             let effort: QwenReasoningEffort = item.thinking ? .medium : .off
@@ -90,6 +110,7 @@ import Testing
                 #expect(try tokenizer.encodeChat(messages: messages, tools: tools, reasoningEffort: effort) == item.ids)
             }
         }
+        #expect(preopened == 12)
     }
 
     @Test func sourceTemplateRendersAndTokensMatchFrozenOracle() async throws {
@@ -129,6 +150,35 @@ import Testing
         #expect(try qat.encodeChat(messages: messages, reasoningEffort: .low) == enabled)
         #expect(try qat.encodeChat(messages: messages, reasoningEffort: .xhigh) == enabled)
         #expect(try qat.encodeChat(messages: messages) == qat.encodeChat(messages: messages, reasoningEffort: .off))
+    }
+
+    @Test func thinkingTurnStartsInsideThePreopenedThoughtChannel() async throws {
+        let qat = try await MFTokenizer.load(from: Self.fixtureFolder(), family: .gemma4)
+            .forCheckpoint(CheckpointIdentity.gemma4QAT)
+        let messages: [MFTokenizer.Message] = [.init(role: .user, content: "Hi")]
+        let ids = try qat.encodeChat(messages: messages, reasoningEffort: .medium)
+        #expect(qat.decode(ids, skipSpecialTokens: false)
+            .hasSuffix("<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n"))
+        #expect(qat.startsInThinking(reasoningEffort: .medium, promptIDs: ids))
+        // The model goes on with the thought itself, closes it, then answers.
+        let decoder = StructuredAssistantDecoder(tokenizer: qat, allowedTools: [], startsInThought: true)
+        var reasoning = ""
+        var events: [StructuredAssistantEvent] = []
+        decoder.onReasoning = { reasoning += $0 }
+        for id in qat.encode("Plan.<channel|>Done.", addBOS: false) {
+            events += try decoder.consume(tokenID: id, delta: qat.decode([id], skipSpecialTokens: false))
+        }
+        events += try decoder.finish()
+        #expect(reasoning == "Plan.")
+        #expect(events.compactMap { if case .content(let text) = $0 { text } else { nil } }.joined() == "Done.")
+        // Prefix recovery still captures before the thought channel.
+        let boundary = try #require(try qat.gemmaRecoveryBoundary(messages: messages, tools: [],
+            reasoningEffort: .medium, preserveThinking: false, promptIDs: ids))
+        #expect(qat.decode(Array(ids[boundary...]), skipSpecialTokens: false) == "<|channel>thought\n")
+        // Thinking off keeps the source's closed channel.
+        let off = try qat.encodeChat(messages: messages, reasoningEffort: .off)
+        #expect(qat.decode(off, skipSpecialTokens: false).hasSuffix("<|turn>model\n<|channel>thought\n<channel|>"))
+        #expect(!qat.startsInThinking(reasoningEffort: .off, promptIDs: off))
     }
 
     @Test(arguments: [false, true])

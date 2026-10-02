@@ -93,6 +93,9 @@ channel text. The qualified raw greedy prompt `The capital of France is`
 repeats in both Mference and the pinned FP16 reference; QAT is not inherently
 loop-free. Chat uses the pinned checkpoint's own template. Thinking is off
 when omitted; `medium`, `low` and `xhigh` all enable the same binary mode.
+With thinking on, a new model turn starts inside a pre-opened thought channel
+(`<|channel>thought\n` after the source's model header), since the 26B can
+otherwise skip thinking; tool-result rounds keep the source suffix.
 The source drops ordinary assistant reasoning and replays tool-call reasoning
 only within the active user turn. The HTTP server accepts `preserve_thinking`
 and normalizes it to this source policy for both Gemma checkpoints; it does

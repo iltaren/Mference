@@ -7,6 +7,11 @@ extension MFTokenizer {
     /// The source macro emits a null argument as Python's `None`. Configure
     /// that output at the interpreter boundary without rewriting the template,
     /// converting nulls to strings, or changing other checkpoints' rendering.
+    /// With thinking on, the source opens a new model turn with the bare
+    /// header and leaves the thought channel to the first sampled token, which
+    /// the 26B can skip; the channel is pre-opened there instead, the way the
+    /// thinking-off suffix closes it. Tool-result continuations keep the
+    /// source suffix.
     func encodeGemmaQATChat(messages: [Tokenizers.Message], tools: [ToolSpec],
                             enableThinking: Bool, addGenerationPrompt: Bool) throws -> [Int32] {
         let template = try Template(String(decoding: effectiveGemmaChatTemplateData(), as: UTF8.self),
@@ -20,7 +25,11 @@ extension MFTokenizer {
             "enable_thinking": .boolean(enableThinking),
             "add_generation_prompt": .boolean(addGenerationPrompt),
         ]
-        return encode(try template.render(context, environment: environment), addBOS: false)
+        var text = try template.render(context, environment: environment)
+        if enableThinking, addGenerationPrompt, text.hasSuffix("<|turn>model\n") {
+            text += "<|channel>thought\n"
+        }
+        return encode(text, addBOS: false)
     }
 
     /// Bound to this checkpoint copy, never shared through the tokenizer cache.
