@@ -1469,8 +1469,10 @@ kernel void attention_prefill_causal_tiled(
 
 constant constexpr int kPrefillTensorOpsOutputs = 8;
 constant constexpr int kPrefillTensorOpsKeys = 64;
-constant constexpr int kPrefillTensorOpsHeadDim = 512;
 
+// One query token and the 8 query heads that share one K/V head per
+// threadgroup. HeadDim is 512 for Gemma 4 and 256 for Qwen 3.6.
+template <int kPrefillTensorOpsHeadDim>
 static inline void attention_prefill_full_tensorops_2d_validity_v2_impl(
     device const half* Q,
     device half* K,
@@ -1564,7 +1566,7 @@ static inline void attention_prefill_full_tensorops_2d_validity_v2_impl(
     auto query_slice = query_tensor.slice(0, 0);
     auto first_value_slice = value_tensor.slice(0, 0);
     auto output_accumulator =
-        pv_op.get_destination_cooperative_tensor<
+        pv_op.template get_destination_cooperative_tensor<
             decltype(weight_tensor), decltype(first_value_slice), float>();
     #pragma clang loop unroll(full)
     for (int element = 0;
@@ -1584,7 +1586,7 @@ static inline void attention_prefill_full_tensorops_2d_validity_v2_impl(
          key_start += uint(kPrefillTensorOpsKeys)) {
         auto key_slice = key_tensor.slice(0, int32_t(key_start));
         auto score_product =
-            qk_op.get_destination_cooperative_tensor<
+            qk_op.template get_destination_cooperative_tensor<
                 decltype(query_slice), decltype(key_slice), float>();
         #pragma clang loop unroll(full)
         for (int element = 0;
@@ -1655,7 +1657,7 @@ static inline void attention_prefill_full_tensorops_2d_validity_v2_impl(
 
         auto value_slice = value_tensor.slice(0, int32_t(key_start));
         auto output_product =
-            pv_op.get_destination_cooperative_tensor<
+            pv_op.template get_destination_cooperative_tensor<
                 decltype(weight_tensor), decltype(value_slice), float>();
         #pragma clang loop unroll(full)
         for (int element = 0;
@@ -1718,7 +1720,7 @@ kernel void attention_prefill_full_tensorops_2d_validity_v2(
     uint3 threads3 [[threads_per_threadgroup]]
 ) {
     threadgroup half query_tile[
-        kPrefillTensorOpsOutputs * kPrefillTensorOpsHeadDim];
+        kPrefillTensorOpsOutputs * 512];
     threadgroup float score_tile[
         kPrefillTensorOpsOutputs * kPrefillTensorOpsKeys];
     threadgroup float weight_tile[
@@ -1726,7 +1728,32 @@ kernel void attention_prefill_full_tensorops_2d_validity_v2(
     threadgroup float row_max[kPrefillTensorOpsOutputs];
     threadgroup float row_sum[kPrefillTensorOpsOutputs];
     threadgroup float row_old_scale[kPrefillTensorOpsOutputs];
-    attention_prefill_full_tensorops_2d_validity_v2_impl(
+    attention_prefill_full_tensorops_2d_validity_v2_impl<512>(
+        Q, K, V, O, p, tg, lid, threads3.x,
+        query_tile, score_tile, weight_tile,
+        row_max, row_sum, row_old_scale);
+}
+
+kernel void attention_prefill_full_tensorops_2d_validity_v2_hd256(
+    device const half* Q [[buffer(0)]],
+    device half* K [[buffer(1)]],
+    device half* V [[buffer(2)]],
+    device half* O [[buffer(3)]],
+    constant PrefillAttentionParams& p [[buffer(4)]],
+    uint3 tg [[threadgroup_position_in_grid]],
+    uint lid [[thread_index_in_threadgroup]],
+    uint3 threads3 [[threads_per_threadgroup]]
+) {
+    threadgroup half query_tile[
+        kPrefillTensorOpsOutputs * 256];
+    threadgroup float score_tile[
+        kPrefillTensorOpsOutputs * kPrefillTensorOpsKeys];
+    threadgroup float weight_tile[
+        kPrefillTensorOpsOutputs * kPrefillTensorOpsKeys];
+    threadgroup float row_max[kPrefillTensorOpsOutputs];
+    threadgroup float row_sum[kPrefillTensorOpsOutputs];
+    threadgroup float row_old_scale[kPrefillTensorOpsOutputs];
+    attention_prefill_full_tensorops_2d_validity_v2_impl<256>(
         Q, K, V, O, p, tg, lid, threads3.x,
         query_tile, score_tile, weight_tile,
         row_max, row_sum, row_old_scale);

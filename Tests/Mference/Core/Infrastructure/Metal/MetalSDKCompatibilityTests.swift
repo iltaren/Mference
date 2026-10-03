@@ -103,8 +103,11 @@ import Metal
                                                            languageVersion: msl4)
         let floorNames = Set(floor.functionNames)
         let latestNames = Set(latest.functionNames)
-        #expect(latestNames.subtracting(floorNames)
-                == ["attention_prefill_full_tensorops_2d_validity_v2"])
+        let tensorOpsKernels: Set<String> = [
+            "attention_prefill_full_tensorops_2d_validity_v2",
+            "attention_prefill_full_tensorops_2d_validity_v2_hd256",
+        ]
+        #expect(latestNames.subtracting(floorNames) == tensorOpsKernels)
         #expect(floorNames.subtracting(latestNames).isEmpty)
     }
 }

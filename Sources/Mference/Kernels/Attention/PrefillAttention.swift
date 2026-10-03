@@ -44,6 +44,8 @@ final class PrefillAttention {
     private let context: MetalContext
     private let psoCausalTiled: MTLComputePipelineState
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
+    /// The same kernel at Qwen 3.6's 256-wide full-attention heads.
+    private let psoFullTensorOps2DValidityV2HD256: MTLComputePipelineState?
     private let gemmaQAT: GemmaQATPrefillAttention?
 
     /// Whether the MPP tensor-ops full-attention kernel is usable here. False
@@ -63,8 +65,12 @@ final class PrefillAttention {
         // Selected by pipeline capability, not GPU family: the kernel also
         // builds on Apple8 (M2), where it measured 9x faster than tiled
         // attention. Below MSL 4.0 it is not in the library.
-        self.psoFullTensorOps2DValidityV2 = gemmaQATMaxContext == nil || gemmaQATFullAttentionTensorOps
+        let tensorOpsAllowed = gemmaQATMaxContext == nil || gemmaQATFullAttentionTensorOps
+        self.psoFullTensorOps2DValidityV2 = tensorOpsAllowed
             ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
+            : nil
+        self.psoFullTensorOps2DValidityV2HD256 = tensorOpsAllowed
+            ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2_hd256")
             : nil
     }
 
@@ -86,14 +92,23 @@ final class PrefillAttention {
         // these are visibility guards rather than shape optimizations.
         let windowNeverClips = params.slidingWindow == 0
             || params.slidingWindow >= params.kvValidCount
-        let tensorOpsShape = requestsTensorOps
+        let fullVisibility = requestsTensorOps
             && kvRingCapacity == 0
             && windowNeverClips
-            && params.headDim == 512
+        // Each threadgroup covers 8 query heads with one K/V head, so only
+        // 16 query heads over 2 K/V heads fit. Gemma 4 (512 wide) keeps its
+        // unit scale guard; Qwen 3.6 (256 wide) scales by 1/16, which the
+        // kernel applies from params.
+        let gemmaShape = params.headDim == 512
             && params.numQHeads == 16
             && params.numKVHeads == 2
             && params.scale == 1.0
-        let tensorOpsPipeline = tensorOpsShape ? psoFullTensorOps2DValidityV2 : nil
+        let qwenShape = params.headDim == 256
+            && params.numQHeads == 16
+            && params.numKVHeads == 2
+        let tensorOpsShape = fullVisibility && (gemmaShape || qwenShape)
+        let tensorOpsPipeline = !tensorOpsShape ? nil
+            : qwenShape ? psoFullTensorOps2DValidityV2HD256 : psoFullTensorOps2DValidityV2
 
         if let gemmaQAT, tensorOpsPipeline == nil {
             gemmaQAT.encode(commandBuffer: commandBuffer,
@@ -117,7 +132,8 @@ final class PrefillAttention {
         } else {
             // Explicit mode also falls back for incompatible shapes, and on
             // hosts where the pipeline does not build or without MSL 4.0.
-            // Benchmark fixtures must use 512/16/2 to prove that TensorOps ran.
+            // Benchmark fixtures must use 512/16/2 or 256/16/2 to prove that
+            // TensorOps ran.
             pipeline = causalTiledPipeline(kvRingCapacity: kvRingCapacity)
         }
         let headDim = Int(params.headDim)

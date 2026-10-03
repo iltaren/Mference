@@ -259,6 +259,69 @@ import MferenceValidationSupport
         #expect(allowedSliding.values == exactSliding.values)
     }
 
+    /// Qwen 3.6 full attention: 256-wide heads, 8 query heads per K/V head
+    /// (one TensorOps tile), and a 1/16 score scale the kernel must apply.
+    @Test(arguments: [
+        1,
+        63, 64, 65,
+        127, 128, 129,
+        1_023, 1_024, 1_025,
+    ])
+    func qwenFullAttentionUsesTensorOpsAtTileBoundaries(_ visibleKeys: Int) throws {
+        let context = try MetalContext()
+        let prefill = try PrefillAttention(context: context)
+        let fixture = Self.makeQwenFullFixture(start: visibleKeys - 1, chunk: 1,
+                                               seed: 0xA880 + UInt64(visibleKeys))
+        let run = try Self.runKernel(fixture, context: context, prefill: prefill,
+                                     path: .fullTensorOps2DPreferred)
+        let repeated = try Self.runKernel(fixture, context: context, prefill: prefill,
+                                          path: .fullTensorOps2DPreferred)
+        #expect(run.usedTensorOps == prefill.tensorOpsPipelineAvailable)
+        #expect(run.values == repeated.values,
+                "Qwen TensorOps attention is not byte-stable at \(visibleKeys) keys")
+        let reference = Self.reference(fixture)
+        let maxAbs = RelError.maxAbsDiff(run.values, reference)
+        let rel = RelError.compute(actual: run.values, reference: reference)
+        #expect(maxAbs <= 2e-2, "Qwen TensorOps maxAbs=\(maxAbs) rel=\(rel) keys=\(visibleKeys)")
+        #expect(rel <= 2e-2, "Qwen TensorOps rel=\(rel) maxAbs=\(maxAbs) keys=\(visibleKeys)")
+    }
+
+    /// A multi-token chunk masks its own future rows, from the origin and
+    /// from an offset, with the causal extent the runner passes as window.
+    @Test func qwenFullAttentionChunkMatchesReference() throws {
+        let context = try MetalContext()
+        let prefill = try PrefillAttention(context: context)
+        let cases: [(start: Int, chunk: Int)] = [(0, 70), (130, 5), (1_000, 9)]
+        for (index, c) in cases.enumerated() {
+            let fixture = Self.makeQwenFullFixture(start: c.start, chunk: c.chunk,
+                                                   seed: 0xA8A0 + UInt64(index))
+            let run = try Self.runKernel(fixture, context: context, prefill: prefill,
+                                         path: .fullTensorOps2DPreferred)
+            #expect(run.usedTensorOps == prefill.tensorOpsPipelineAvailable)
+            let reference = Self.reference(fixture)
+            let maxAbs = RelError.maxAbsDiff(run.values, reference)
+            let rel = RelError.compute(actual: run.values, reference: reference)
+            #expect(maxAbs <= 2e-2, "Qwen chunk start=\(c.start) maxAbs=\(maxAbs) rel=\(rel)")
+            #expect(rel <= 2e-2, "Qwen chunk start=\(c.start) rel=\(rel) maxAbs=\(maxAbs)")
+        }
+    }
+
+    /// The 256-wide kernel covers 8 query heads per threadgroup with one K/V
+    /// head, so Gemma's sliding-window shape (2 query heads per K/V head)
+    /// stays on the tiled kernel even when its window covers every key.
+    @Test func gemmaSlidingShapeKeepsTheTiledKernel() throws {
+        let context = try MetalContext()
+        let prefill = try PrefillAttention(context: context)
+        let fixture = Self.makeFixture(start: 40, chunk: 4, window: 1_024, seed: 0xA8B0,
+                                       headDim: 256, qHeads: 16, kvHeads: 8)
+        let run = try Self.runKernel(fixture, context: context, prefill: prefill,
+                                     path: .fullTensorOps2DPreferred)
+        #expect(!run.usedTensorOps)
+        let tiled = try Self.runKernel(fixture, context: context, prefill: prefill,
+                                       path: .causalTiled)
+        #expect(run.values == tiled.values)
+    }
+
     /// The other TensorOps tests return early when the path is unavailable, so
     /// on their own they would stay green if the kernel silently disappeared
     /// from the shader library. This one fails loudly instead: once a device
@@ -316,6 +379,17 @@ import MferenceValidationSupport
                        headDim: headDim, qHeads: qHeads, kvHeads: kvHeads,
                        start: start, chunk: chunk, kvValid: kvValid,
                        window: window, scale: 1.0)
+    }
+
+    /// Qwen 3.6 full-attention geometry. Queries are scaled up so the 1/16
+    /// score scale still leaves a peaked softmax; the window is the causal
+    /// extent, as `RealForwardRunner` passes it for full layers.
+    private static func makeQwenFullFixture(start: Int, chunk: Int, seed: UInt64) -> Fixture {
+        var fixture = makeFixture(start: start, chunk: chunk, window: start + chunk, seed: seed,
+                                  headDim: 256, qHeads: 16, kvHeads: 2)
+        fixture.q = fixture.q.map { $0 * 16 }
+        fixture.scale = 0.0625
+        return fixture
     }
 
     private static func runAndCompare(_ fixture: Fixture, label: String) throws {
