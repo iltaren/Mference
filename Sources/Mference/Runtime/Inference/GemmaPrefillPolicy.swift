@@ -17,16 +17,20 @@ struct GemmaPrefillPolicy: Equatable, Sendable {
     let prefillMatmulSourceFP16: Bool
     /// The shipped QAT profile for full-attention prefill; same switch.
     let prefillAttentionSourceFP16: Bool
-    /// Batched shared expert and grouped-GEMM routed experts. Source arithmetic
-    /// has no grouped form; `MFERENCE_GEMMA_PREFILL_LEGACY=1` also disables it.
-    let batchedExperts: Bool
+    /// Batched INT4 shared expert. Source arithmetic has no batched form;
+    /// `MFERENCE_GEMMA_PREFILL_LEGACY=1` also disables it.
+    let batchedSharedExpert: Bool
+    /// Grouped-GEMM routed experts, opt-in (`PrefillGroupedExpertGate`) and
+    /// never with the legacy or exact switches.
+    let groupedExperts: Bool
 
     init(modelID: String,
          environment: [String: String] = ProcessInfo.processInfo.environment) {
         sourceFP16 = modelID == CheckpointIdentity.gemma4QAT
         prefillMatmulSourceFP16 = sourceFP16 && environment["MFERENCE_QAT_EXACT_PREFILL"] == "1"
         prefillAttentionSourceFP16 = prefillMatmulSourceFP16
-        batchedExperts = !prefillMatmulSourceFP16 && environment["MFERENCE_GEMMA_PREFILL_LEGACY"] != "1"
+        batchedSharedExpert = !prefillMatmulSourceFP16 && environment["MFERENCE_GEMMA_PREFILL_LEGACY"] != "1"
+        groupedExperts = batchedSharedExpert && PrefillGroupedExpertGate.optedIn(environment)
     }
 }
 
@@ -37,6 +41,13 @@ struct GemmaPrefillPolicy: Equatable, Sendable {
 /// experts, so the same 1.5x gate serves both.
 enum PrefillGroupedExpertGate {
     static let tileRows = 64
+
+    /// Grouped GEMM reorders floating-point sums against the per-row kernel,
+    /// so Gemma 4 and Qwen 3.6 use it only with
+    /// `MFERENCE_PREFILL_GROUPED_EXPERTS=1`.
+    static func optedIn(_ environment: [String: String]) -> Bool {
+        environment["MFERENCE_PREFILL_GROUPED_EXPERTS"] == "1"
+    }
 
     static func usesGroupedGEMM(pairCounts: [Int]) -> Bool {
         let real = pairCounts.reduce(0, +)

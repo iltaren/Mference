@@ -9,34 +9,48 @@ import Testing
         #expect(policy.sourceFP16)
         #expect(!policy.prefillMatmulSourceFP16)
         #expect(!policy.prefillAttentionSourceFP16)
-        #expect(policy.batchedExperts)
+        #expect(policy.batchedSharedExpert)
+        #expect(!policy.groupedExperts, "grouped-GEMM routed experts are opt-in")
+    }
+
+    @Test(arguments: [CheckpointIdentity.gemma4QAT, originalID])
+    func groupedExpertsTurnOnOnlyWhenOptedIn(modelID: String) {
+        let policy = GemmaPrefillPolicy(modelID: modelID,
+                                        environment: ["MFERENCE_PREFILL_GROUPED_EXPERTS": "1"])
+        #expect(policy.batchedSharedExpert)
+        #expect(policy.groupedExperts)
     }
 
     @Test func exactPrefillSwitchRestoresTheShippedQATProfile() {
         let policy = GemmaPrefillPolicy(modelID: CheckpointIdentity.gemma4QAT,
-                                        environment: ["MFERENCE_QAT_EXACT_PREFILL": "1"])
+                                        environment: ["MFERENCE_QAT_EXACT_PREFILL": "1",
+                                                      "MFERENCE_PREFILL_GROUPED_EXPERTS": "1"])
         #expect(policy.sourceFP16)
         #expect(policy.prefillMatmulSourceFP16)
         #expect(policy.prefillAttentionSourceFP16)
-        // Source arithmetic has no grouped-GEMM form; the switch restores
-        // the whole shipped prefill, including per-row experts.
-        #expect(!policy.batchedExperts)
+        // Source arithmetic has no batched or grouped form; the switch restores
+        // the whole shipped prefill, even with grouped experts opted in.
+        #expect(!policy.batchedSharedExpert)
+        #expect(!policy.groupedExperts)
     }
 
-    @Test func originalGemmaKeepsNormalArithmeticAndBatchesExperts() {
+    @Test func originalGemmaKeepsNormalArithmeticAndBatchesTheSharedExpert() {
         let policy = GemmaPrefillPolicy(modelID: Self.originalID,
                                         environment: ["MFERENCE_QAT_EXACT_PREFILL": "1"])
         #expect(!policy.sourceFP16)
         #expect(!policy.prefillMatmulSourceFP16)
         #expect(!policy.prefillAttentionSourceFP16)
-        #expect(policy.batchedExperts)
+        #expect(policy.batchedSharedExpert)
+        #expect(!policy.groupedExperts)
     }
 
     @Test(arguments: [CheckpointIdentity.gemma4QAT, originalID])
     func legacySwitchKeepsPerRowExpertsForBothCheckpoints(modelID: String) {
         let policy = GemmaPrefillPolicy(modelID: modelID,
-                                        environment: ["MFERENCE_GEMMA_PREFILL_LEGACY": "1"])
-        #expect(!policy.batchedExperts)
+                                        environment: ["MFERENCE_GEMMA_PREFILL_LEGACY": "1",
+                                                      "MFERENCE_PREFILL_GROUPED_EXPERTS": "1"])
+        #expect(!policy.batchedSharedExpert)
+        #expect(!policy.groupedExperts)
         #expect(!policy.prefillMatmulSourceFP16)
         #expect(!policy.prefillAttentionSourceFP16)
     }

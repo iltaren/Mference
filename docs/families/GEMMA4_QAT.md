@@ -107,6 +107,10 @@ unchanged, and this integration provides text inference only.
 Since 2026-09-21 the default prefill runs QAT's Q/K/V/O projections, shared
 expert and routed experts on the kernels original Gemma uses, batches the INT4
 shared expert, and runs well-filled routed tiles as grouped matrix products.
+Since 2026-10-03 those grouped matrix products are opt-in
+(`MFERENCE_PREFILL_GROUPED_EXPERTS=1`, see
+[Runtime controls](../RUNTIME_CONTROLS.md)); routed experts otherwise use the
+per-row kernel, and the first table below was measured with them on.
 Since 2026-09-25 its five full-attention layers also prefill with the
 tensor-ops attention kernel wherever that pipeline builds on macOS 26, M2
 included; it accumulates in FP32 where the source rounds scores and

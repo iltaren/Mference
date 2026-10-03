@@ -8,12 +8,12 @@ import Testing
 ///
 /// Set `MFERENCE_QWEN_PREFILL_GATE` to an installed `qwen36.gturbo`; the
 /// install is read-only. Three prefills of the same tokens: control (tiled
-/// full attention, per-row routed experts), attention (tensor-ops full
-/// attention, per-row experts) and candidate (the default: tensor-ops
-/// attention, grouped-GEMM experts). Each is teacher-forced through the same
-/// tokens, so every difference comes from the prefill kernels; control ->
-/// attention isolates the attention kernel and attention -> candidate the
-/// grouped experts.
+/// full attention, per-row routed experts), the default (tensor-ops full
+/// attention, per-row experts) and grouped (the default plus the opt-in
+/// grouped-GEMM experts, `MFERENCE_PREFILL_GROUPED_EXPERTS=1`). Each is
+/// teacher-forced through the same tokens, so every difference comes from the
+/// prefill kernels; control -> default isolates the attention kernel and
+/// default -> grouped the grouped experts.
 ///
 /// Items: the frozen community prompts with the saved Gemma answers (the
 /// answers are inputs, not expectations), plus, when
@@ -138,20 +138,20 @@ struct QwenPrefillEquivalenceGateTests {
             return outcome
         }
 
-        let rowExperts: [String: String] = ["MFERENCE_QWEN_PREFILL_ROW_EXPERTS": "1"]
-        let control = try await run(rowExperts, attention: .causalTiled)
-        let attentionOnly = try await run(rowExperts, attention: .fullTensorOps2DPreferred)
-        let candidate = try await run([:], attention: .fullTensorOps2DPreferred)
+        let control = try await run([:], attention: .causalTiled)
+        let defaults = try await run([:], attention: .fullTensorOps2DPreferred)
+        let grouped = try await run(["MFERENCE_PREFILL_GROUPED_EXPERTS": "1"],
+                                    attention: .fullTensorOps2DPreferred)
 
         #expect(control.groupedTiles == 0)
         #expect(control.tensorOpsAttentionLayers == 0)
-        #expect(attentionOnly.groupedTiles == 0)
-        #expect(attentionOnly.tensorOpsAttentionLayers > 0, """
+        #expect(defaults.groupedTiles == 0, "grouped-GEMM routed experts are opt-in")
+        #expect(defaults.tensorOpsAttentionLayers > 0, """
             full-attention prefill fell back from the tensor-ops kernel; it needs macOS 26 (MSL 4.0) \
             and a GPU where the pipeline builds
             """)
-        #expect(candidate.tensorOpsAttentionLayers > 0)
-        #expect(candidate.groupedTiles > 0, "the 2,940-token prompt's full 2,048-token chunk fills grouped-GEMM tiles")
+        #expect(grouped.tensorOpsAttentionLayers > 0)
+        #expect(grouped.groupedTiles > 0, "the 2,940-token prompt's full 2,048-token chunk fills grouped-GEMM tiles")
 
         func compare(_ label: String, _ base: Outcome, _ test: Outcome) throws -> [[String: Any]] {
             var differences: [Double] = [], baseSum = 0.0, sameTop = 0
@@ -193,15 +193,15 @@ struct QwenPrefillEquivalenceGateTests {
             return saved
         }
 
-        print("[qwen-prefill-gate] grouped tiles=\(candidate.groupedTiles) tensor-ops attention layers=\(candidate.tensorOpsAttentionLayers)")
-        let controlToAttention = try compare("control->attention", control, attentionOnly)
-        let attentionToCandidate = try compare("attention->candidate", attentionOnly, candidate)
-        let controlToCandidate = try compare("control->candidate", control, candidate)
+        print("[qwen-prefill-gate] grouped tiles=\(grouped.groupedTiles) tensor-ops attention layers=\(defaults.tensorOpsAttentionLayers)")
+        let controlToDefault = try compare("control->default", control, defaults)
+        let defaultToGrouped = try compare("default->grouped", defaults, grouped)
+        let controlToGrouped = try compare("control->grouped", control, grouped)
         if let path = environment["MFERENCE_QWEN_PREFILL_GATE_OUT"] {
             try JSONSerialization.data(withJSONObject: ["modelID": model.modelID,
-                                                        "controlToAttention": controlToAttention,
-                                                        "attentionToCandidate": attentionToCandidate,
-                                                        "controlToCandidate": controlToCandidate])
+                                                        "controlToDefault": controlToDefault,
+                                                        "defaultToGrouped": defaultToGrouped,
+                                                        "controlToGrouped": controlToGrouped])
                 .write(to: URL(fileURLWithPath: path))
         }
     }

@@ -194,9 +194,8 @@ toggles, not quality controls.
 
 Gemma prefill has two switches that are not byte-identical, because the
 defaults reorder floating-point sums. `MFERENCE_GEMMA_PREFILL_LEGACY=1` returns
-Gemma 4 and Gemma 4 QAT to the per-token shared expert and per-row routed
-experts; the default batches the INT4 shared expert and runs well-filled
-routed tiles as grouped matrix products. `MFERENCE_QAT_EXACT_PREFILL=1`
+Gemma 4 and Gemma 4 QAT to the per-token shared expert; the default batches
+the INT4 shared expert. `MFERENCE_QAT_EXACT_PREFILL=1`
 additionally returns QAT's prefill projections, shared expert, routed experts
 and full-attention layers to the MLX FP16 reduction order, which is several
 times slower on long prompts. QAT decode, routing, normalization and
@@ -206,13 +205,16 @@ and for the
 On macOS 26, full-attention prefill for both checkpoints uses the tensor-ops
 kernel wherever its pipeline builds, M2 included; it has no separate switch.
 
-Qwen 3.6 prefill has one switch of the same kind.
-`MFERENCE_QWEN_PREFILL_ROW_EXPERTS=1` keeps per-row routed experts; the default
-runs well-filled routed tiles as grouped matrix products. Its full-attention
-layers take the 256-wide build of the same tensor-ops kernel. Both reorder
-floating-point sums; the
+Qwen 3.6's full-attention layers take the 256-wide build of the same
+tensor-ops kernel, which reorders floating-point sums; the
 [prefill quality gate](QWEN36_PERFORMANCE.md#prefill-attention-grouped-experts-and-streamed-text-2026-10-03)
 found no change in teacher-forced NLL.
+
+`MFERENCE_PREFILL_GROUPED_EXPERTS=1` (off by default since 2026-10-03) runs
+well-filled routed prefill tiles of Gemma 4, Gemma 4 QAT and Qwen 3.6 as
+grouped matrix products instead of per-row products. It saves a few percent
+of prefill on long prompts (Qwen 3.6: 2.7-4.4 %) and reorders floating-point
+sums once more; the legacy and exact Gemma switches turn it off.
 
 Flash-Next's installer carries an MTP sidecar, but native Flash-Next speculative
 execution is not implemented. The dense Qwen MTP switches do not activate it.

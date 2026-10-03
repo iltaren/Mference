@@ -8,9 +8,10 @@ private let qwenGroupedGEMMAvailable: Bool = {
     return MPPGroupedRoutedMoE(context: context).isAvailable
 }()
 
-/// Runner-level wiring of grouped-GEMM routed experts for Qwen 3.6. The toy
-/// routes every token to all eight experts, so a 64-token chunk fills whole
-/// matrix tiles; both schedules must agree up to the matmul reordering.
+/// Runner-level wiring of the opt-in grouped-GEMM routed experts for Qwen 3.6
+/// (`MFERENCE_PREFILL_GROUPED_EXPERTS=1`). The toy routes every token to all
+/// eight experts, so a 64-token chunk fills whole matrix tiles; both schedules
+/// must agree up to the matmul reordering.
 @Suite(.serialized) struct QwenGroupedExpertPrefillTests {
     struct Harness {
         let directory: URL
@@ -44,8 +45,8 @@ private let qwenGroupedGEMMAvailable: Bool = {
 
     @Test(.enabled(if: qwenGroupedGEMMAvailable, "Requires runtime MPP TensorOps support"))
     func groupedExpertsReproducePerRowExpertLogits() async throws {
-        let rows = try Harness(environment: ["MFERENCE_QWEN_PREFILL_ROW_EXPERTS": "1"])
-        let grouped = try Harness(environment: [:])
+        let rows = try Harness(environment: [:])
+        let grouped = try Harness(environment: ["MFERENCE_PREFILL_GROUPED_EXPERTS": "1"])
         defer {
             try? FileManager.default.removeItem(at: rows.directory)
             try? FileManager.default.removeItem(at: grouped.directory)

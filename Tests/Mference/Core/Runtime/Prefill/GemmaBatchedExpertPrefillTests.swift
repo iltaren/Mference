@@ -8,10 +8,11 @@ private let groupedGEMMAvailable: Bool = {
     return MPPGroupedRoutedMoE(context: context).isAvailable
 }()
 
-/// Runner-level wiring of grouped-GEMM routed experts: tile parameters, the
-/// borrowed activation scratch and argument-buffer lifetime. Kernel arithmetic
-/// is covered by the kernel suites; here both schedules must agree on a toy
-/// model up to the matmul reordering.
+/// Runner-level wiring of the opt-in grouped-GEMM routed experts
+/// (`MFERENCE_PREFILL_GROUPED_EXPERTS=1`): tile parameters, the borrowed
+/// activation scratch and argument-buffer lifetime. Kernel arithmetic is
+/// covered by the kernel suites; here both schedules must agree on a toy model
+/// up to the matmul reordering.
 @Suite(.serialized) struct GemmaBatchedExpertPrefillTests {
     struct Harness {
         let directory: URL
@@ -44,8 +45,8 @@ private let groupedGEMMAvailable: Bool = {
 
     @Test(.enabled(if: groupedGEMMAvailable, "Requires runtime MPP TensorOps support"))
     func groupedExpertsReproducePerRowExpertLogits() async throws {
-        let legacy = try Harness(environment: ["MFERENCE_GEMMA_PREFILL_LEGACY": "1"])
-        let batched = try Harness(environment: [:])
+        let legacy = try Harness(environment: [:])
+        let batched = try Harness(environment: ["MFERENCE_PREFILL_GROUPED_EXPERTS": "1"])
         defer {
             try? FileManager.default.removeItem(at: legacy.directory)
             try? FileManager.default.removeItem(at: batched.directory)
@@ -54,7 +55,8 @@ private let groupedGEMMAvailable: Bool = {
         let actual = try await batched.prefillRow(Self.tokens[...])
 
         // Every token routes to all eight experts: 64 rows per expert per
-        // chunk, which fills the matrix tiles exactly.
+        // chunk, which fills the matrix tiles exactly. The default keeps the
+        // per-row kernel.
         #expect(legacy.runner.prefillGroupedExpertTiles == 0)
         #expect(batched.runner.prefillGroupedExpertTiles > 0)
         // The toy's shared expert is 8-bit, which has no batched INT4 form;

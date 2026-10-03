@@ -173,7 +173,7 @@ struct GemmaPrefillEquivalenceGateTests {
         #expect(control.sharedPath == .repeatedRows)
         #expect(control.tensorOpsAttentionLayers == 0)
         #expect(previous.tensorOpsAttentionLayers == 0)
-        #expect(candidate.groupedTiles > 0, "the 3,015-token prompt fills grouped-GEMM tiles")
+        #expect(candidate.groupedTiles == 0, "grouped-GEMM routed experts are opt-in")
         #expect(candidate.sharedPath == .tensorOpsInt4, "the INT4 shared expert must run batched")
         #expect(candidate.tensorOpsAttentionLayers > 0, """
             full-attention prefill fell back from the tensor-ops kernel; it needs macOS 26 (MSL 4.0) \

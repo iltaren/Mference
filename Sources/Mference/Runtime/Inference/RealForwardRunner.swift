@@ -344,7 +344,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Internal fault-injection boundary; production leaves this unset.
     var dsv4PrefillDidCompleteLayer: ((Int) throws -> Void)?
     private let gemmaPrefillPolicy: GemmaPrefillPolicy
-    /// Grouped-GEMM routed experts for well-filled Gemma prefill tiles.
+    /// Grouped-GEMM routed experts for well-filled Gemma 4 and Qwen 3.6
+    /// prefill tiles; opt-in (`PrefillGroupedExpertGate.optedIn`).
     private let prefillGroupedGEMM: MPPGroupedRoutedMoE?
     /// Routed prefill tiles that ran as grouped GEMM rather than per-row GEMV.
     private(set) var prefillGroupedExpertTiles = 0
@@ -715,7 +716,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                              siluActivation: silu,
                                                              groupSize: int4GroupSize,
                                                              sourceFP16: prefillMatmulSourceFP16)
-        let groupedExperts = (cfg.family == .gemma4 && policy.batchedExperts)
+        let groupedExperts = (cfg.family == .gemma4 && policy.groupedExperts)
             || (cfg.family == .qwen36 && (qwenPrefillPolicy ?? QwenPrefillPolicy()).groupedExperts)
         self.prefillGroupedGEMM = groupedExperts
             ? MPPGroupedRoutedMoE(context: context, groupSize: int4GroupSize, gelu: !silu)
@@ -1813,7 +1814,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws -> PrefillChunkScratchBuffers {
         let layout = PrefillChunkScratchLayout(
             config: cfg, runtime: config,
-            batchedSharedExpert: cfg.family == .gemma4 && gemmaPrefillPolicy.batchedExperts
+            batchedSharedExpert: cfg.family == .gemma4 && gemmaPrefillPolicy.batchedSharedExpert
                 && model.sharedExpertWeightBits == 4,
             groupedExperts: prefillGroupedGEMM?.isAvailable == true)
         if let scratch = prefillScratch, scratch.layout == layout {

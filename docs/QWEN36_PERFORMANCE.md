@@ -59,11 +59,13 @@ Qwen chunk), greedy decoding, one A/B pair per prompt after 60 s cool-downs:
 | --- | --- | ---: | ---: |
 | Tensor-ops full-attention prefill (256-wide) | 2,940 tokens | 41.1 s | 33.2 s (-19 %) |
 | | 16,044 tokens | 555.5 s | 251.0 s (-55 %) |
-| Grouped-GEMM routed experts, on top | 2,940 tokens | 32.7 s | 31.3 s (-4.4 %) |
+| Grouped-GEMM routed experts, on top (opt-in) | 2,940 tokens | 32.7 s | 31.3 s (-4.4 %) |
 | | 16,044 tokens | 249.4 s | 242.7 s (-2.7 %) |
 | Incremental byte-level detokenizer | 3,072-token reply | 8.60 tok/s | 8.81 tok/s (+2.4 %) |
 
-Decode speed is unchanged by the two prefill changes. Both reorder
+Grouped-GEMM routed experts are off by default since 2026-10-03;
+`MFERENCE_PREFILL_GROUPED_EXPERTS=1` turns them on. Decode speed is unchanged
+by the two prefill changes. Both reorder
 floating-point sums, so greedy text can take a different, equally likely path
 after a few dozen tokens. `QwenPrefillEquivalenceGateTests` teacher-forces
 1,200 predictions (the frozen `medium-review` and `long-synthesis` prompts
@@ -77,6 +79,11 @@ old kernels, the attention kernel alone, and both:
 | Old -> both | -0.0055 (-0.0109 .. -0.0002) | 98.3 % |
 
 Positions with lower and higher NLL split roughly evenly: quality is unchanged.
+Per position, the attention kernel moves the scores more than the grouped
+experts (mean absolute dNLL 0.038 against 0.030, 19 against 12 changed top-1
+predictions), and stacking both moved them no further than attention alone
+(0.038, 20). The gate now runs the default (tensor-ops attention) and, as its
+third prefill, the opt-in grouped experts.
 The detokenizer streams exactly the library decode, so its output is
 byte-identical.
 
