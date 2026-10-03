@@ -612,11 +612,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                       runtimeConfiguration: runtimeConfiguration, gemmaPrefillPolicy: nil)
     }
 
-    /// `gemmaPrefillPolicy` is nil in production, which derives it from the
-    /// checkpoint identity and the documented environment switches.
+    /// `gemmaPrefillPolicy` and `qwenPrefillPolicy` are nil in production,
+    /// which derives them from the checkpoint identity and the documented
+    /// environment switches.
     init(model: Model, context: MetalContext, maxContext: Int,
          runtimeConfiguration: RuntimeConfiguration = .production,
-         gemmaPrefillPolicy: GemmaPrefillPolicy?) throws {
+         gemmaPrefillPolicy: GemmaPrefillPolicy?,
+         qwenPrefillPolicy: QwenPrefillPolicy? = nil) throws {
         self.model = model
         self.ctx = context
         self.cfg = model.config
@@ -713,7 +715,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                              siluActivation: silu,
                                                              groupSize: int4GroupSize,
                                                              sourceFP16: prefillMatmulSourceFP16)
-        self.prefillGroupedGEMM = cfg.family == .gemma4 && policy.batchedExperts
+        let groupedExperts = (cfg.family == .gemma4 && policy.batchedExperts)
+            || (cfg.family == .qwen36 && (qwenPrefillPolicy ?? QwenPrefillPolicy()).groupedExperts)
+        self.prefillGroupedGEMM = groupedExperts
             ? MPPGroupedRoutedMoE(context: context, groupSize: int4GroupSize, gelu: !silu)
             : nil
         self.prefillMoE = try PrefillMoE(context: context, sourceFP16: sourceFP16)

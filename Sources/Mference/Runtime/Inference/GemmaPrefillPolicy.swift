@@ -33,6 +33,8 @@ struct GemmaPrefillPolicy: Equatable, Sendable {
 /// Grouped GEMM computes whole 64-row matrix tiles per expert, so it pays only
 /// while padding stays small. Measured on M2: ~17.5 us per padded row against
 /// ~29.6 us per real row for the row kernel, a break-even near 1.69x padding.
+/// Qwen 3.6's shape (D 2048, F 512) breaks even near 1.49x for one-block
+/// experts, so the same 1.5x gate serves both.
 enum PrefillGroupedExpertGate {
     static let tileRows = 64
 
