@@ -64,6 +64,9 @@ public struct MFTokenizer: @unchecked Sendable {
     /// when the tokenizer is not Gemma or does not declare the pinned decoder
     /// sequence, which keeps the library's own decode.
     let losslessGemmaSpecialTokenIDs: Set<Int32>?
+    /// Incremental byte-level decode (`ByteLevelDecoding`); nil keeps the
+    /// library's re-decode in `MFDetokenizer`.
+    let byteLevelDecoding: ByteLevelDecoding?
     public internal(set) var isSwiftQwen = false
     public internal(set) var isBaseQwen38 = false
     public internal(set) var isGemmaQAT = false
@@ -177,7 +180,8 @@ public struct MFTokenizer: @unchecked Sendable {
         let tokenizerData = try await configuration.tokenizerData
         let underlying = try AutoTokenizer.from(tokenizerConfig: tokenizerConfig,
                                                 tokenizerData: tokenizerData)
-        return try MFTokenizer(tokenizer: underlying, family: nil, tokenizerData: tokenizerData)
+        return try MFTokenizer(tokenizer: underlying, family: nil, tokenizerData: tokenizerData,
+                               tokenizerConfig: tokenizerConfig)
     }
 
     static func loadUncached(from folder: URL) async throws -> MFTokenizer {
@@ -195,7 +199,8 @@ public struct MFTokenizer: @unchecked Sendable {
         let tokenizerData = try await configuration.tokenizerData
         let underlying = try PreTrainedTokenizer(tokenizerConfig: tokenizerConfig,
                                                  tokenizerData: tokenizerData)
-        var value = try MFTokenizer(tokenizer: underlying, family: family, tokenizerData: tokenizerData)
+        var value = try MFTokenizer(tokenizer: underlying, family: family, tokenizerData: tokenizerData,
+                                    tokenizerConfig: tokenizerConfig)
         value.localTokenizerFolder = folder.standardizedFileURL
         return value
     }
@@ -212,7 +217,8 @@ public struct MFTokenizer: @unchecked Sendable {
         try self.init(tokenizer: tokenizer, family: family, tokenizerData: nil)
     }
 
-    init(tokenizer: any Tokenizer, family: ModelFamily?, tokenizerData: Config?) throws {
+    init(tokenizer: any Tokenizer, family: ModelFamily?, tokenizerData: Config?,
+         tokenizerConfig: Config? = nil) throws {
         self.tokenizer = tokenizer
         self.usesJSONChatMLToolCalls = family == .maple
         self.supportsOptInThinking = family == .qwen36 || family == .gemma4
@@ -251,6 +257,16 @@ public struct MFTokenizer: @unchecked Sendable {
         self.losslessGemmaSpecialTokenIDs = dialect == .gemma
             ? tokenizerData.flatMap {
                 GemmaDecoding.declaresPinnedDecoder($0) ? GemmaDecoding.specialTokenIDs($0) : nil
+            }
+            : nil
+        // ChatML only (the Qwen families); other byte-level tokenizers keep
+        // the library re-decode.
+        self.byteLevelDecoding = dialect == .chatml
+            ? tokenizerData.flatMap { data in
+                tokenizerConfig.flatMap { config in
+                    ByteLevelDecoding(tokenizerData: data,
+                                      cleanUpTokenizationSpaces: config.cleanUpTokenizationSpaces.boolean(or: true))
+                }
             }
             : nil
         self.bosID = resolved.bosID

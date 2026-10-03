@@ -277,8 +277,13 @@ struct ByteLevelDetokenizerTests {
     /// separate unresolvable subparts, so the decoder renders three adjacent
     /// U+FFFD. Byte-level BPE can emit those bytes as ordinary tokens.
     @Test("A multi-scalar replacement run is withheld as a whole")
-    func multiScalarRunIsWithheldWhole() {
-        var detok = MFDetokenizer(tokenizer: tok)
+    func multiScalarRunIsWithheldWhole() async throws {
+        // Withholding belongs to the library re-decode path, which this
+        // fixture takes once clean-up is on; with clean-up off the byte-level
+        // path never decodes an incomplete scalar in the first place.
+        let library = try await ByteLevelDecodingTests.fixtureVariant(cleanUp: true)
+        #expect(library.byteLevelDecoding == nil)
+        var detok = MFDetokenizer(tokenizer: library)
         var assembled = ""
         for byte in [0xED, 0xA0] {
             let delta = detok.push(Int32(byte))
@@ -295,10 +300,13 @@ struct ByteLevelDetokenizerTests {
     /// committed prefix must not rewind — a shrinking `emitted` silently re-emits
     /// text the caller already received.
     @Test("Pushing after a flush never rewinds the committed prefix")
-    func pushAfterFlushNeverRewinds() {
-        let ids = tok.encode("a🦙", addBOS: false)
+    func pushAfterFlushNeverRewinds() async throws {
+        // `emitted` exists only on the library re-decode path (clean-up on).
+        let library = try await ByteLevelDecodingTests.fixtureVariant(cleanUp: true)
+        #expect(library.byteLevelDecoding == nil)
+        let ids = library.encode("a🦙", addBOS: false)
         #expect(ids.count == 5, "expected one ASCII plus four emoji bytes")
-        var detok = MFDetokenizer(tokenizer: tok)
+        var detok = MFDetokenizer(tokenizer: library)
         var assembled = ""
         for id in ids.prefix(2) {
             assembled += detok.push(id)

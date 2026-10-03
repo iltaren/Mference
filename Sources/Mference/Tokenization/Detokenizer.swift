@@ -7,8 +7,10 @@ import Tokenizers
 /// lossless path: each token contributes its own fragment, byte-fallback runs
 /// commit as a whole (`GemmaDecoding`, `ByteFallbackRun`), and the cost is O(1)
 /// per token. Callers split the stream at channel and tool markers by flushing
-/// and starting a fresh detokenizer, so a run never spans a marker. Every other
-/// tokenizer re-decodes through the library as described below.
+/// and starting a fresh detokenizer, so a run never spans a marker. A ChatML
+/// byte-level tokenizer with clean-up off (Qwen) takes `ByteLevelDecoding`'s
+/// incremental path, also O(1) per token and equal to the library decode.
+/// Every other tokenizer re-decodes through the library as described below.
 ///
 /// Four challenges drive the library-decode design:
 ///
@@ -59,14 +61,27 @@ struct MFDetokenizer {
     let skipSpecialTokens: Bool
     /// In-flight byte-fallback run on the lossless path.
     var run = ByteFallbackRun()
+    /// Incremental byte-level path; nil selects library decode.
+    let byteLevel: ByteLevelDecoding?
+    /// Bytes of the current byte-level run not yet emitted.
+    var byteRun = ByteLevelRun()
 
     init(tokenizer: MFTokenizer, skipSpecialTokens: Bool = true) {
         self.tokenizer = tokenizer.tokenizer
         self.losslessSpecialTokenIDs = tokenizer.losslessGemmaSpecialTokenIDs
+        self.byteLevel = tokenizer.byteLevelDecoding
         self.skipSpecialTokens = skipSpecialTokens
     }
 
     mutating func push(_ id: Int32) -> String {
+        if let byteLevel {
+            // The library removes special IDs first and drops IDs it cannot
+            // resolve; an added token ends the byte run and stays verbatim.
+            if skipSpecialTokens, byteLevel.specialTokenIDs.contains(id) { return "" }
+            guard let token = tokenizer.convertIdToToken(Int(id)) else { return "" }
+            if byteLevel.addedTokens.contains(token) { return byteRun.commit() + token }
+            return byteRun.push(token)
+        }
         if let specials = losslessSpecialTokenIDs {
             // An unknown ID contributes nothing and leaves the run open, as the
             // library's decode drops unresolvable IDs.
@@ -94,6 +109,7 @@ struct MFDetokenizer {
 
     mutating func flush() -> String {
         if losslessSpecialTokenIDs != nil { return run.commit() }
+        if byteLevel != nil { return byteRun.commit() }
         let stableText = stableIDs.isEmpty
             ? ""
             : tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
