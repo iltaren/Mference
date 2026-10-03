@@ -49,6 +49,37 @@ Qwen full-attention specialization. Candidate pilot routing, staged projection/
 convolution, conv/QK normalization, and packed-Q epilogue fusions were removed
 after production runs failed to beat the accepted path.
 
+## Prefill attention, grouped experts and streamed text (2026-10-03)
+
+Three changes ported from the Gemma 4 work, measured on an Apple M2 MacBook Air
+(16 GB, macOS 26.6.2) with the release CLI, `--prefill-chunk 2048` (the server's
+Qwen chunk), greedy decoding, one A/B pair per prompt after 60 s cool-downs:
+
+| Change | Prompt | Before | After |
+| --- | --- | ---: | ---: |
+| Tensor-ops full-attention prefill (256-wide) | 2,940 tokens | 41.1 s | 33.2 s (-19 %) |
+| | 16,044 tokens | 555.5 s | 251.0 s (-55 %) |
+| Grouped-GEMM routed experts, on top | 2,940 tokens | 32.7 s | 31.3 s (-4.4 %) |
+| | 16,044 tokens | 249.4 s | 242.7 s (-2.7 %) |
+| Incremental byte-level detokenizer | 3,072-token reply | 8.60 tok/s | 8.81 tok/s (+2.4 %) |
+
+Decode speed is unchanged by the two prefill changes. Both reorder
+floating-point sums, so greedy text can take a different, equally likely path
+after a few dozen tokens. `QwenPrefillEquivalenceGateTests` teacher-forces
+1,200 predictions (the frozen `medium-review` and `long-synthesis` prompts
+through saved answers, plus the last 200 tokens of a 16K prompt) through the
+old kernels, the attention kernel alone, and both:
+
+| Comparison | Mean dNLL (95 % interval) | Same top-1 |
+| --- | --- | ---: |
+| Old -> tensor-ops attention | -0.0049 (-0.0108 .. +0.0009) | 98.4 % |
+| Attention -> + grouped experts | -0.0006 (-0.0057 .. +0.0045) | 99.0 % |
+| Old -> both | -0.0055 (-0.0109 .. -0.0002) | 98.3 % |
+
+Positions with lower and higher NLL split roughly evenly: quality is unchanged.
+The detokenizer streams exactly the library decode, so its output is
+byte-identical.
+
 ## Memory: the 8 GB envelope
 
 The whole point of the runtime is a 26B-class MoE on an 8 GB Mac in about
